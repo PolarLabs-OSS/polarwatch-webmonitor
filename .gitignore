@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+# Build products
+build/
+dist/
+out/
+*.spec
+*.log
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Never publish private data or local monitoring settings
+data/
+*.db
+*.db-*
+*.sqlite*
+sites.json
+settings.json
+.env*
+*.pem
+*.key
+*.pfx
+*.p12
+*.wallet
+wallet*
+mining/
+monero/
+xmrig/
+archive_builds/

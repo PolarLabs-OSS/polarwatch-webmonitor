@@ -1,0 +1,114 @@
+name: Build Windows and Linux
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: polarwatch-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-2022, os: windows, arch: x64, label: "Windows x64"}
+          - {runner: windows-11-arm, os: windows, arch: ARM64, label: "Windows ARM64"}
+          - {runner: ubuntu-22.04, os: linux, arch: x64, label: "Linux x64"}
+          - {runner: ubuntu-22.04-arm, os: linux, arch: ARM64, label: "Linux ARM64"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Linux graphical dependencies
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb xauth patchelf libx11-6 libxrender1 libxext6
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+      - name: Verify CPU architecture
+        shell: python
+        run: |
+          import platform,sysconfig
+          tag=sysconfig.get_platform().lower()
+          arch="ARM64" if "arm64" in tag or "aarch64" in tag else "x64"
+          print("ARCH",platform.machine(),tag,arch)
+          assert arch=="${{ matrix.arch }}", "Incorrect runner architecture"
+      - name: Unit tests (Windows)
+        if: matrix.os == 'windows'
+        run: python -m unittest discover -s tests_monitor -p "test_*.py" -v
+      - name: Unit tests (Linux + virtual GUI)
+        if: matrix.os == 'linux'
+        run: xvfb-run -a python -m unittest discover -s tests_monitor -p "test_*.py" -v
+      - name: Build executable (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name PolarWatch-WebMonitor --icon "assets/polarwatch_neon_icon.ico" --add-data "assets;assets" --collect-all customtkinter --collect-all PIL --hidden-import PIL._tkinter_finder --hidden-import PIL._imagingtk polarwatch_sites.py
+      - name: Build executable (Linux)
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile \
+            --name PolarWatch-WebMonitor \
+            --add-data "assets:assets" \
+            --collect-all customtkinter \
+            --collect-all PIL \
+            --hidden-import PIL._tkinter_finder \
+            --hidden-import PIL._imagingtk \
+            polarwatch_sites.py
+      - name: Smoke test packed GUI (Windows)
+        if: matrix.os == 'windows'
+        run: python scripts/smoke_gui.py
+      - name: Smoke test packed GUI (Linux)
+        if: matrix.os == 'linux'
+        run: xvfb-run -a python scripts/smoke_gui.py
+      - name: Create portable archive
+        run: python scripts/package.py --version 2.1.0 --os ${{ matrix.os }} --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polarwatch-${{ matrix.os }}-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+  release:
+    name: Publish v2.1.0
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: polarwatch-*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate all archives and create checksums
+        shell: bash
+        run: |
+          python scripts/check_release.py release-assets
+          (cd release-assets && sha256sum *.zip *.tar.gz > SHA256SUMS.txt)
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v2.1.0 >/dev/null 2>&1 || \
+            gh release create v2.1.0 --target "$GITHUB_SHA" \
+              --title "PolarWatch Web Monitor v2.1.0 — Windows & Linux" \
+              --notes-file RELEASE_NOTES.md
+          gh release upload v2.1.0 release-assets/*.zip release-assets/*.tar.gz release-assets/SHA256SUMS.txt --clobber
+          gh release view v2.1.0 --json url,assets
